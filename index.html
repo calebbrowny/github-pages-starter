@@ -1,1093 +1,1113 @@
-import React, { useEffect, useMemo, useState } from "react";
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>The Cave Gym — Monthly Challenge</title>
+  <!-- Tailwind (with line-clamp plugin) -->
+  <script src="https://cdn.tailwindcss.com?plugins=line-clamp"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {}
+      }
+    }
+  </script>
+  <!-- React 18 + Babel (buildless) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body, #root { height: 100%; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div id="root"></div>
 
-/**
- * Cave Gym — Monthly Challenge (Minimal UI, GitHub Pages fix)
- *
- * Changes in this revision:
- * - Fixed all unterminated string constants ("\n" literals were split across lines by mistake).
- * - Removed a duplicate copy of the entire file that snuck in (caused line numbers to blow out).
- * - Added light self-tests for time parsing/formatting in dev console.
- * - Minor hardening for ID generation if crypto.randomUUID() is unavailable.
- */
+  <script type="text/babel" data-presets="env,react">
+    // --------------------------- Utilities ---------------------------
+    const LS_KEY = "cave.monthlyChallenges.v2";
+    const LS_ADMIN_KEY = "cave.admin.password";
 
-// --------------------------- Utilities ---------------------------
-const LS_KEY = "cave.monthlyChallenges.v2";
-const LS_ADMIN_KEY = "cave.admin.password";
-
-function mmYYYY(date = new Date()) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`; // e.g., 2025-08
-}
-
-const nowTs = () => Date.now();
-const uuid = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
-
-function shallowClone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
-
-// Parse time strings like "1:23", "12:34.5", "0:45", "2:03:05" -> seconds (number)
-function parseTimeToSeconds(input) {
-  if (!input || typeof input !== "string") return NaN;
-  const s = input.trim();
-  const parts = s.split(":");
-  if (parts.length === 1) {
-    const sec = Number(parts[0]);
-    return isNaN(sec) ? NaN : sec;
-  }
-  if (parts.length === 2) {
-    const [mStr, sStr] = parts;
-    const mins = Number(mStr);
-    const secs = Number(sStr);
-    if (isNaN(mins) || isNaN(secs)) return NaN;
-    return mins * 60 + secs;
-  }
-  if (parts.length === 3) {
-    const [hStr, mStr, sStr] = parts;
-    const hours = Number(hStr);
-    const mins = Number(mStr);
-    const secs = Number(sStr);
-    if (isNaN(hours) || isNaN(mins) || isNaN(secs)) return NaN;
-    return hours * 3600 + mins * 60 + secs;
-  }
-  return NaN;
-}
-
-function formatSeconds(totalSeconds, precision = 1) {
-  if (totalSeconds == null || isNaN(totalSeconds)) return "—";
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const secs = totalSeconds % 60;
-  const showMs = precision > 0 && !Number.isInteger(secs);
-  const secStr = showMs ? secs.toFixed(precision) : String(Math.round(secs));
-  const mm = String(minutes).padStart(2, "0");
-  const ss = String(Math.floor(Number(secStr))).padStart(2, "0");
-  const tail = showMs ? `.${String(secStr).split(".")[1]}` : "";
-  if (hours > 0) return `${hours}:${mm}:${ss}${tail}`;
-  return `${minutes}:${ss}${tail}`;
-}
-
-function compareEntries(a, b, scoringMode, tiebreaker) {
-  // scoringMode: 'time_lowest' | 'number_highest'
-  // tiebreaker: 'earliest' | 'latest'
-  let diff = 0;
-  if (scoringMode === "time_lowest") diff = a.value - b.value; else diff = b.value - a.value;
-  if (diff !== 0) return diff;
-  // tie
-  if (tiebreaker === "latest") return b.createdAt - a.createdAt;
-  return a.createdAt - b.createdAt; // earliest
-}
-
-function withinWindow(ch) {
-  if (!ch.options?.submissionsEnabled) return false;
-  const t = nowTs();
-  const { openAt, closeAt } = ch.options || {};
-  if (openAt && t < openAt) return false;
-  if (closeAt && t > closeAt) return false;
-  return true;
-}
-
-function defaultSeed() {
-  const id = mmYYYY();
-  return {
-    activeChallengeId: id,
-    global: {
-      termsUrl: "",
-      brandingName: "The Cave Gym",
-    },
-    challenges: {
-      [id]: {
-        id,
-        title: "50 Cal Row — For Time",
-        tagline: "Fastest 50 calories on the rower wins.",
-        description: "",
-        rules: [
-          "Row 50 calories on a Concept2.",
-          "Start from a full stop.",
-          "One-take video showing monitor before/after.",
-        ],
-        showRules: true,
-        prize: "1‑month membership + merch pack",
-        showPrize: true,
-        scoringMode: "time_lowest", // or 'number_highest'
-        scoreLabel: "mm:ss",
-        precision: 1,
-        tiebreaker: "earliest",
-        categories: ["Female", "Male"],
-        coverImage: "",
-        options: {
-          submissionsEnabled: true,
-          requireVideo: true,
-          maxEntriesPerName: 3,
-          openAt: 0, // 0 = no limit
-          closeAt: 0,
-          leaderboardLocked: false,
-        },
-        submissions: [],
-      },
-    },
-  };
-}
-
-function loadData() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return defaultSeed();
-    const parsed = JSON.parse(raw);
-    if (!parsed.activeChallengeId || !parsed.challenges) return defaultSeed();
-    return parsed;
-  } catch (e) {
-    console.warn("Failed to load data, seeding defaults", e);
-    return defaultSeed();
-  }
-}
-
-function saveData(data) {
-  localStorage.setItem(LS_KEY, JSON.stringify(data));
-}
-
-// --------------------------- UI Bits ---------------------------
-function Pill({ children }) {
-  return (
-    <span className="inline-flex items-center rounded-full bg-white/70 backdrop-blur px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
-      {children}
-    </span>
-  );
-}
-
-function Card({ title, children, actions }) {
-  return (
-    <div className="w-full rounded-2xl bg-white/90 backdrop-blur ring-1 ring-slate-200 p-5">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-base font-semibold text-slate-800">{title}</h3>
-        <div className="flex items-center gap-2">{actions}</div>
-      </div>
-      <div>{children}</div>
-    </div>
-  );
-}
-
-function SectionTitle({ children, subtitle }) {
-  return (
-    <div className="mb-2">
-      <h2 className="text-sm font-semibold text-slate-900">{children}</h2>
-      {subtitle && <p className="text-xs text-slate-600 mt-0.5">{subtitle}</p>}
-    </div>
-  );
-}
-
-// --------------------------- App ---------------------------
-export default function App() {
-  const [data, setData] = useState(() => loadData());
-  const [selectedId, setSelectedId] = useState(() => data.activeChallengeId);
-  const [adminMode, setAdminMode] = useState(false);
-  const [authed, setAuthed] = useState(false);
-  const [showArchive, setShowArchive] = useState(false);
-
-  useEffect(() => saveData(data), [data]);
-
-  const challenge = data.challenges[selectedId];
-
-  const allMonths = useMemo(() => {
-    return Object.keys(data.challenges).sort((a, b) => (a < b ? 1 : -1));
-  }, [data]);
-
-  useEffect(() => {
-    // Self-tests (appear in console)
-    runSelfTests();
-  }, []);
-
-  return (
-    <div className="min-h-screen w-full relative overflow-x-hidden">
-      {/* Softer gradient background */}
-      <div className="pointer-events-none absolute inset-0 -z-10">
-        <div className="absolute inset-0 bg-gradient-to-br from-white via-blue-50 to-pink-50" />
-        <div className="absolute -top-24 -left-24 h-64 w-64 rounded-full bg-pink-200/30 blur-3xl" />
-        <div className="absolute -bottom-24 -right-24 h-64 w-64 rounded-full bg-blue-200/30 blur-3xl" />
-      </div>
-
-      {/* Header */}
-      <header className="px-5 md:px-10 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="h-8 w-8 rounded-xl bg-gradient-to-br from-blue-500 to-pink-500" />
-          <h1 className="text-lg md:text-xl font-bold tracking-tight text-slate-900">{data.global?.brandingName || "The Cave Gym"} — Monthly Challenge</h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            className="rounded-xl bg-white/80 hover:bg-white transition px-3 py-2 text-xs md:text-sm font-medium ring-1 ring-slate-200 text-slate-700"
-            onClick={() => setShowArchive(true)}
-          >
-            View past challenges
-          </button>
-          <button
-            className="rounded-xl bg-white/80 hover:bg-white transition px-3 py-2 text-xs md:text-sm font-medium ring-1 ring-slate-200 text-slate-700"
-            onClick={() => setAdminMode((v) => !v)}
-            title="Toggle admin panel"
-          >
-            {adminMode ? "Close Admin" : "Admin"}
-          </button>
-        </div>
-      </header>
-
-      {/* Sub header (compact) */}
-      <div className="px-5 md:px-10 mt-1 mb-5 flex flex-wrap items-center gap-2">
-        <Pill>Month: <span className="font-semibold ml-1">{selectedId}</span></Pill>
-        <select
-          className="rounded-xl bg-white/80 px-3 py-1.5 text-xs ring-1 ring-slate-200 text-slate-800"
-          value={selectedId}
-          onChange={(e) => setSelectedId(e.target.value)}
-        >
-          {allMonths.map((id) => (
-            <option key={id} value={id}>{id}</option>
-          ))}
-        </select>
-        <Pill>Active: <span className="font-semibold ml-1">{data.activeChallengeId}</span></Pill>
-      </div>
-
-      {/* Main content */}
-      <main className="px-5 md:px-10 grid grid-cols-1 xl:grid-cols-3 gap-5 pb-14">
-        <div className="xl:col-span-2 space-y-5">
-          <ChallengeCard challenge={challenge} termsUrl={data.global?.termsUrl} />
-          <Leaderboard challenge={challenge} />
-        </div>
-        <div className="space-y-5">
-          <SubmitForm
-            challenge={challenge}
-            disabled={!withinWindow(challenge) || selectedId !== data.activeChallengeId || challenge.options?.leaderboardLocked}
-            onSubmit={(entry) => {
-              // enforce max entries per name
-              const maxPer = challenge.options?.maxEntriesPerName || 3;
-              const count = (challenge.submissions || []).filter((s) => s.name.trim().toLowerCase() === entry.name.trim().toLowerCase()).length;
-              if (count >= maxPer) {
-                alert(`Limit reached: max ${maxPer} submissions for this month.`);
-                return;
-              }
-              setData((prev) => {
-                const d = shallowClone(prev);
-                d.challenges[challenge.id].submissions.push(entry);
-                return d;
-              });
-            }}
-          />
-        </div>
-      </main>
-
-      {adminMode && (
-        <AdminPanel
-          authed={authed}
-          onAuthed={() => setAuthed(true)}
-          data={data}
-          setData={setData}
-          selectedId={selectedId}
-          setSelectedId={setSelectedId}
-        />
-      )}
-
-      {showArchive && (
-        <ArchiveModal
-          challenges={data.challenges}
-          activeId={selectedId}
-          onSelect={(id) => { setSelectedId(id); setShowArchive(false); }}
-          onClose={() => setShowArchive(false)}
-        />
-      )}
-
-      <footer className="px-5 md:px-10 py-8 text-[11px] text-slate-500">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          <div>Local data. Use Admin → Entries → Export for backups.</div>
-          <div>Built for The Cave Gym · v2</div>
-        </div>
-      </footer>
-    </div>
-  );
-}
-
-function ChallengeCard({ challenge, termsUrl }) {
-  if (!challenge) return null;
-  return (
-    <Card title={challenge.title}>
-      <div className="grid md:grid-cols-[1fr] gap-3 items-start">
-        {challenge.coverImage && (
-          <img src={challenge.coverImage} alt="challenge" className="w-full h-40 object-cover rounded-xl ring-1 ring-slate-200" />
-        )}
-        <div className="space-y-2">
-          {challenge.tagline && <p className="text-slate-700 text-sm">{challenge.tagline}</p>}
-          <div className="flex flex-wrap items-center gap-2">
-            <Pill>{challenge.scoringMode === "time_lowest" ? "Lowest time wins" : "Highest number wins"}</Pill>
-            <Pill>Categories: {(challenge.categories || []).join(" / ")}</Pill>
-            {challenge.showPrize && challenge.prize && <Pill>Prize: {challenge.prize}</Pill>}
-            {!withinWindow(challenge) && <Pill>Submissions closed</Pill>}
-          </div>
-          {challenge.showRules && (challenge.rules?.length > 0) && (
-            <details className="mt-1">
-              <summary className="cursor-pointer text-slate-700 text-sm">Rules</summary>
-              <ul className="list-disc pl-5 text-slate-700 space-y-1 text-sm mt-1">
-                {challenge.rules.map((r, i) => <li key={i}>{r}</li>)}
-              </ul>
-            </details>
-          )}
-          {termsUrl && (
-            <a className="text-xs underline text-slate-500" href={termsUrl} target="_blank" rel="noreferrer">Terms & fair play</a>
-          )}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-function Leaderboard({ challenge }) {
-  const categories = challenge.categories || [];
-  const { scoringMode, tiebreaker, precision } = challenge;
-
-  return (
-    <Card title="Leaderboard">
-      <div className="space-y-5">
-        {categories.map((cat) => {
-          const entries = (challenge.submissions || [])
-            .filter((s) => s.category === cat && (s.status || "approved") !== "rejected")
-            .sort((a, b) => compareEntries(a, b, scoringMode, tiebreaker));
-          return (
-            <div key={cat}>
-              <div className="flex items-center gap-2 mb-1">
-                <h4 className="text-slate-800 font-semibold text-sm">{cat}</h4>
-                <Pill>{entries.length} entries</Pill>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-slate-600">
-                      <th className="py-1.5 pr-4">#</th>
-                      <th className="py-1.5 pr-4">Name</th>
-                      <th className="py-1.5 pr-4">Score</th>
-                      <th className="py-1.5 pr-4">Proof</th>
-                      <th className="py-1.5 pr-4">Date</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {entries.length === 0 && (
-                      <tr>
-                        <td colSpan={5} className="py-4 text-slate-500">No entries yet.</td>
-                      </tr>
-                    )}
-                    {entries.map((e, idx) => (
-                      <tr key={e.id} className="border-t border-slate-100">
-                        <td className="py-1.5 pr-4 font-medium text-slate-800">{idx + 1}</td>
-                        <td className="py-1.5 pr-4">{e.name}</td>
-                        <td className="py-1.5 pr-4 font-semibold text-slate-900">
-                          {challenge.scoringMode === "time_lowest" ? formatSeconds(e.value, precision) : e.value}
-                        </td>
-                        <td className="py-1.5 pr-4">
-                          {e.videoUrl ? (
-                            <a className="underline text-blue-700" href={e.videoUrl} target="_blank" rel="noreferrer">View</a>
-                          ) : (
-                            <span className="text-slate-400">—</span>
-                          )}
-                        </td>
-                        <td className="py-1.5 pr-4 text-slate-600">{new Date(e.createdAt).toLocaleDateString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
-}
-
-function SubmitForm({ challenge, disabled, onSubmit }) {
-  const [name, setName] = useState("");
-  const [category, setCategory] = useState(challenge.categories?.[0] || "");
-  const [score, setScore] = useState("");
-  const [videoUrl, setVideoUrl] = useState("");
-  const [err, setErr] = useState("");
-  const [ok, setOk] = useState("");
-
-  useEffect(() => {
-    setCategory(challenge.categories?.[0] || "");
-    setScore("");
-    setName("");
-    setVideoUrl("");
-    setErr("");
-    setOk("");
-  }, [challenge.id]);
-
-  function handleSubmit(e) {
-    e.preventDefault();
-    setErr("");
-    setOk("");
-
-    if (!name.trim()) return setErr("Enter your name.");
-    if (!category) return setErr("Choose a category.");
-    if (!score.trim()) return setErr("Enter your score.");
-    if (challenge.options?.requireVideo && !videoUrl.trim()) return setErr("Video link required.");
-
-    let value;
-    if (challenge.scoringMode === "time_lowest") {
-      value = parseTimeToSeconds(score);
-      if (isNaN(value)) return setErr("Invalid time. Use mm:ss (e.g., 1:23.4)");
-    } else {
-      value = Number(score);
-      if (isNaN(value)) return setErr("Invalid number.");
+    function mmYYYY(date = new Date()) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, "0");
+      return `${y}-${m}`; // e.g., 2025-08
     }
 
-    const entry = {
-      id: uuid(),
-      name: name.trim(),
-      category,
-      value,
-      videoUrl: videoUrl.trim(),
-      createdAt: Date.now(),
-      status: "approved", // default to approved for MVP
-    };
-    onSubmit(entry);
-    setOk("Submitted — nice work.");
-    setName("");
-    setScore("");
-    setVideoUrl("");
-  }
+    const nowTs = () => Date.now();
+    const uuid = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 
-  return (
-    <Card
-      title="Submit"
-      actions={disabled ? <Pill>Closed</Pill> : null}
-    >
-      <form onSubmit={handleSubmit} className="space-y-2">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <input
-            className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Full name"
-            disabled={disabled}
-            required
-          />
-          <select
-            className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            disabled={disabled}
-            required
-          >
-            {(challenge.categories || []).map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <input
-            className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
-            value={score}
-            onChange={(e) => setScore(e.target.value)}
-            placeholder={challenge.scoringMode === "time_lowest" ? "mm:ss" : "number"}
-            disabled={disabled}
-            required
-          />
-          <input
-            className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
-            value={videoUrl}
-            onChange={(e) => setVideoUrl(e.target.value)}
-            placeholder="Video link"
-            disabled={disabled || !challenge.options?.requireVideo}
-            required={!!challenge.options?.requireVideo}
-          />
-        </div>
-        {err && <div className="text-xs text-rose-600">{err}</div>}
-        {ok && <div className="text-xs text-emerald-600">{ok}</div>}
-        <div className="pt-1">
-          <button
-            type="submit"
-            disabled={disabled}
-            className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold disabled:opacity-50"
-          >
-            Submit Entry
-          </button>
-        </div>
-      </form>
-    </Card>
-  );
-}
+    function shallowClone(obj) {
+      return JSON.parse(JSON.stringify(obj));
+    }
 
-function ArchiveModal({ challenges, activeId, onSelect, onClose }) {
-  const ids = Object.keys(challenges).sort((a, b) => (a < b ? 1 : -1));
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div className="w-full max-w-3xl rounded-2xl bg-white p-4 ring-1 ring-slate-200" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-3">
-          <h4 className="text-base font-semibold">Past Challenges</h4>
-          <button onClick={onClose} className="text-slate-600 text-sm">Close</button>
-        </div>
-        <div className="grid sm:grid-cols-2 gap-3">
-          {ids.map((id) => {
-            const ch = challenges[id];
-            // get top-1 per category
-            const winners = (ch.categories || []).map((cat) => {
-              const sorted = (ch.submissions || [])
-                .filter((s) => s.category === cat && (s.status || "approved") !== "rejected")
-                .sort((a, b) => compareEntries(a, b, ch.scoringMode, ch.tiebreaker));
-              const top = sorted[0];
-              return { cat, top };
-            });
-            return (
-              <button key={id} onClick={() => onSelect(id)} className={`text-left rounded-xl ring-1 ring-slate-200 p-3 hover:bg-slate-50 ${id===activeId?"bg-slate-50":""}`}>
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold text-slate-900">{id} · {ch.title}</div>
-                </div>
-                <div className="mt-1 text-xs text-slate-600 line-clamp-2">{ch.tagline || ch.description}</div>
-                <div className="mt-2 text-xs text-slate-700 space-y-1">
-                  {winners.map(({cat, top}) => (
-                    <div key={cat}>
-                      <span className="font-medium">{cat}:</span> {top ? `${top.name} (${ch.scoringMode === 'time_lowest' ? formatSeconds(top.value, ch.precision) : top.value})` : "—"}
-                    </div>
-                  ))}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
+    // Parse time strings like "1:23", "12:34.5", "0:45", "2:03:05" -> seconds (number)
+    function parseTimeToSeconds(input) {
+      if (!input || typeof input !== "string") return NaN;
+      const s = input.trim();
+      const parts = s.split(":");
+      if (parts.length === 1) {
+        const sec = Number(parts[0]);
+        return isNaN(sec) ? NaN : sec;
+      }
+      if (parts.length === 2) {
+        const [mStr, sStr] = parts;
+        const mins = Number(mStr);
+        const secs = Number(sStr);
+        if (isNaN(mins) || isNaN(secs)) return NaN;
+        return mins * 60 + secs;
+      }
+      if (parts.length === 3) {
+        const [hStr, mStr, sStr] = parts;
+        const hours = Number(hStr);
+        const mins = Number(mStr);
+        const secs = Number(sStr);
+        if (isNaN(hours) || isNaN(mins) || isNaN(secs)) return NaN;
+        return hours * 3600 + mins * 60 + secs;
+      }
+      return NaN;
+    }
 
-// --------------------------- Admin ---------------------------
-function AdminPanel({ authed, onAuthed, data, setData, selectedId, setSelectedId }) {
-  const [pwInput, setPwInput] = useState("");
-  const [tab, setTab] = useState("challenge");
+    function formatSeconds(totalSeconds, precision = 1) {
+      if (totalSeconds == null || isNaN(totalSeconds)) return "—";
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const secs = totalSeconds % 60;
+      const showMs = precision > 0 && !Number.isInteger(secs);
+      const secStr = showMs ? secs.toFixed(precision) : String(Math.round(secs));
+      const mm = String(minutes).padStart(2, "0");
+      const ss = String(Math.floor(Number(secStr))).padStart(2, "0");
+      const tail = showMs ? `.${String(secStr).split(".")[1]}` : "";
+      if (hours > 0) return `${hours}:${mm}:${ss}${tail}`;
+      return `${minutes}:${ss}${tail}`;
+    }
 
-  if (!authed) {
-    return (
-      <div className="fixed inset-x-0 bottom-0 z-30">
-        <div className="mx-4 md:mx-10 mb-6 rounded-2xl bg-white ring-1 ring-slate-200">
-          <div className="p-5">
-            <h3 className="text-base font-semibold text-slate-900 mb-2">Admin Login</h3>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const stored = localStorage.getItem(LS_ADMIN_KEY) || "caveadmin"; // default password
-                if (pwInput === stored) onAuthed();
-              }}
-              className="flex gap-2"
-            >
-              <input
-                className="flex-1 rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
-                placeholder="Admin password (default: caveadmin)"
-                type="password"
-                value={pwInput}
-                onChange={(e) => setPwInput(e.target.value)}
-              />
-              <button className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold">Login</button>
-            </form>
+    function compareEntries(a, b, scoringMode, tiebreaker) {
+      // scoringMode: 'time_lowest' | 'number_highest'
+      // tiebreaker: 'earliest' | 'latest'
+      let diff = 0;
+      if (scoringMode === "time_lowest") diff = a.value - b.value; else diff = b.value - a.value;
+      if (diff !== 0) return diff;
+      // tie
+      if (tiebreaker === "latest") return b.createdAt - a.createdAt;
+      return a.createdAt - b.createdAt; // earliest
+    }
+
+    function withinWindow(ch) {
+      if (!ch.options?.submissionsEnabled) return false;
+      const t = nowTs();
+      const { openAt, closeAt } = ch.options || {};
+      if (openAt && t < openAt) return false;
+      if (closeAt && t > closeAt) return false;
+      return true;
+    }
+
+    function defaultSeed() {
+      const id = mmYYYY();
+      return {
+        activeChallengeId: id,
+        global: {
+          termsUrl: "",
+          brandingName: "The Cave Gym",
+        },
+        challenges: {
+          [id]: {
+            id,
+            title: "50 Cal Row — For Time",
+            tagline: "Fastest 50 calories on the rower wins.",
+            description: "",
+            rules: [
+              "Row 50 calories on a Concept2.",
+              "Start from a full stop.",
+              "One-take video showing monitor before/after.",
+            ],
+            showRules: true,
+            prize: "1‑month membership + merch pack",
+            showPrize: true,
+            scoringMode: "time_lowest", // or 'number_highest'
+            scoreLabel: "mm:ss",
+            precision: 1,
+            tiebreaker: "earliest",
+            categories: ["Female", "Male"],
+            coverImage: "",
+            options: {
+              submissionsEnabled: true,
+              requireVideo: true,
+              maxEntriesPerName: 3,
+              openAt: 0, // 0 = no limit
+              closeAt: 0,
+              leaderboardLocked: false,
+            },
+            submissions: [],
+          },
+        },
+      };
+    }
+
+    function loadData() {
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return defaultSeed();
+        const parsed = JSON.parse(raw);
+        if (!parsed.activeChallengeId || !parsed.challenges) return defaultSeed();
+        return parsed;
+      } catch (e) {
+        console.warn("Failed to load data, seeding defaults", e);
+        return defaultSeed();
+      }
+    }
+
+    function saveData(data) {
+      localStorage.setItem(LS_KEY, JSON.stringify(data));
+    }
+
+    // --------------------------- UI Bits ---------------------------
+    function Pill({ children }) {
+      return (
+        <span className="inline-flex items-center rounded-full bg-white/70 backdrop-blur px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+          {children}
+        </span>
+      );
+    }
+
+    function Card({ title, children, actions }) {
+      return (
+        <div className="w-full rounded-2xl bg-white/90 backdrop-blur ring-1 ring-slate-200 p-5">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-base font-semibold text-slate-800">{title}</h3>
+            <div className="flex items-center gap-2">{actions}</div>
           </div>
+          <div>{children}</div>
         </div>
-      </div>
-    );
-  }
+      );
+    }
 
-  return (
-    <div className="fixed inset-x-0 bottom-0 z-30">
-      <div className="mx-4 md:mx-10 mb-6 rounded-2xl bg-white ring-1 ring-slate-200">
-        <div className="p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-base font-semibold text-slate-900">Admin</h3>
+    function SectionTitle({ children, subtitle }) {
+      return (
+        <div className="mb-2">
+          <h2 className="text-sm font-semibold text-slate-900">{children}</h2>
+          {subtitle && <p className="text-xs text-slate-600 mt-0.5">{subtitle}</p>}
+        </div>
+      );
+    }
+
+    // --------------------------- App ---------------------------
+    function App() {
+      const [data, setData] = React.useState(() => loadData());
+      const [selectedId, setSelectedId] = React.useState(() => data.activeChallengeId);
+      const [adminMode, setAdminMode] = React.useState(false);
+      const [authed, setAuthed] = React.useState(false);
+      const [showArchive, setShowArchive] = React.useState(false);
+
+      React.useEffect(() => saveData(data), [data]);
+
+      const challenge = data.challenges[selectedId];
+
+      const allMonths = React.useMemo(() => {
+        return Object.keys(data.challenges).sort((a, b) => (a < b ? 1 : -1));
+      }, [data]);
+
+      React.useEffect(() => {
+        // Self-tests (appear in console)
+        runSelfTests();
+      }, []);
+
+      return (
+        <div className="min-h-screen w-full relative overflow-x-hidden">
+          {/* Softer gradient background */}
+          <div className="pointer-events-none absolute inset-0 -z-10">
+            <div className="absolute inset-0 bg-gradient-to-br from-white via-blue-50 to-pink-50" />
+            <div className="absolute -top-24 -left-24 h-64 w-64 rounded-full bg-pink-200/30 blur-3xl" />
+            <div className="absolute -bottom-24 -right-24 h-64 w-64 rounded-full bg-blue-200/30 blur-3xl" />
+          </div>
+
+          {/* Header */}
+          <header className="px-5 md:px-10 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 rounded-xl bg-gradient-to-br from-blue-500 to-pink-500" />
+              <h1 className="text-lg md:text-xl font-bold tracking-tight text-slate-900">{data.global?.brandingName || "The Cave Gym"} — Monthly Challenge</h1>
+            </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setTab("challenge")}
-                className={`rounded-xl px-3 py-1.5 text-sm ring-1 ring-slate-200 ${tab === "challenge" ? "bg-slate-900 text-white" : "bg-white"}`}
-              >Challenge</button>
+                className="rounded-xl bg-white/80 hover:bg-white transition px-3 py-2 text-xs md:text-sm font-medium ring-1 ring-slate-200 text-slate-700"
+                onClick={() => setShowArchive(true)}
+              >
+                View past challenges
+              </button>
               <button
-                onClick={() => setTab("entries")}
-                className={`rounded-xl px-3 py-1.5 text-sm ring-1 ring-slate-200 ${tab === "entries" ? "bg-slate-900 text-white" : "bg-white"}`}
-              >Entries</button>
-              <button
-                onClick={() => setTab("settings")}
-                className={`rounded-xl px-3 py-1.5 text-sm ring-1 ring-slate-200 ${tab === "settings" ? "bg-slate-900 text-white" : "bg-white"}`}
-              >Settings</button>
+                className="rounded-xl bg-white/80 hover:bg-white transition px-3 py-2 text-xs md:text-sm font-medium ring-1 ring-slate-200 text-slate-700"
+                onClick={() => setAdminMode((v) => !v)}
+                title="Toggle admin panel"
+              >
+                {adminMode ? "Close Admin" : "Admin"}
+              </button>
             </div>
-          </div>
+          </header>
 
-          {tab === "challenge" && (
-            <AdminChallengeTab data={data} setData={setData} selectedId={selectedId} setSelectedId={setSelectedId} />
-          )}
-          {tab === "entries" && (
-            <AdminEntriesTab data={data} setData={setData} selectedId={selectedId} />
-          )}
-          {tab === "settings" && (
-            <AdminSettingsTab data={data} setData={setData} />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AdminChallengeTab({ data, setData, selectedId, setSelectedId }) {
-  const ch = data.challenges[selectedId];
-  const [form, setForm] = useState(() => ({
-    title: ch.title || "",
-    tagline: ch.tagline || "",
-    description: ch.description || "",
-    rules: (ch.rules || []).join("\n"),
-    prize: ch.prize || "",
-    showPrize: !!ch.showPrize,
-    showRules: !!ch.showRules,
-    scoringMode: ch.scoringMode || "time_lowest",
-    scoreLabel: ch.scoreLabel || (ch.scoringMode === "time_lowest" ? "mm:ss" : "number"),
-    precision: ch.precision ?? 1,
-    tiebreaker: ch.tiebreaker || "earliest",
-    categories: (ch.categories || []).join(", "),
-    coverImage: ch.coverImage || "",
-    submissionsEnabled: ch.options?.submissionsEnabled ?? true,
-    requireVideo: ch.options?.requireVideo ?? true,
-    maxEntriesPerName: ch.options?.maxEntriesPerName ?? 3,
-    openAt: ch.options?.openAt || 0,
-    closeAt: ch.options?.closeAt || 0,
-    leaderboardLocked: ch.options?.leaderboardLocked ?? false,
-  }));
-
-  useEffect(() => {
-    const ch2 = data.challenges[selectedId];
-    setForm({
-      title: ch2.title || "",
-      tagline: ch2.tagline || "",
-      description: ch2.description || "",
-      rules: (ch2.rules || []).join("\n"),
-      prize: ch2.prize || "",
-      showPrize: !!ch2.showPrize,
-      showRules: !!ch2.showRules,
-      scoringMode: ch2.scoringMode || "time_lowest",
-      scoreLabel: ch2.scoreLabel || (ch2.scoringMode === "time_lowest" ? "mm:ss" : "number"),
-      precision: ch2.precision ?? 1,
-      tiebreaker: ch2.tiebreaker || "earliest",
-      categories: (ch2.categories || []).join(", "),
-      coverImage: ch2.coverImage || "",
-      submissionsEnabled: ch2.options?.submissionsEnabled ?? true,
-      requireVideo: ch2.options?.requireVideo ?? true,
-      maxEntriesPerName: ch2.options?.maxEntriesPerName ?? 3,
-      openAt: ch2.options?.openAt || 0,
-      closeAt: ch2.options?.closeAt || 0,
-      leaderboardLocked: ch2.options?.leaderboardLocked ?? false,
-    });
-  }, [selectedId]);
-
-  function saveEdits() {
-    setData((prev) => {
-      const d = shallowClone(prev);
-      const ch3 = d.challenges[selectedId];
-      ch3.title = form.title.trim();
-      ch3.tagline = form.tagline.trim();
-      ch3.description = form.description.trim();
-      ch3.rules = form.rules.split("\n").map((r) => r.trim()).filter(Boolean);
-      ch3.prize = form.prize.trim();
-      ch3.showPrize = !!form.showPrize;
-      ch3.showRules = !!form.showRules;
-      ch3.scoringMode = form.scoringMode;
-      ch3.scoreLabel = form.scoreLabel.trim() || (form.scoringMode === "time_lowest" ? "mm:ss" : "number");
-      ch3.precision = Number(form.precision) || 0;
-      ch3.tiebreaker = form.tiebreaker;
-      ch3.categories = form.categories.split(",").map((c) => c.trim()).filter(Boolean);
-      ch3.coverImage = form.coverImage.trim();
-      ch3.options = {
-        submissionsEnabled: !!form.submissionsEnabled,
-        requireVideo: !!form.requireVideo,
-        maxEntriesPerName: Number(form.maxEntriesPerName) || 1,
-        openAt: Number(form.openAt) || 0,
-        closeAt: Number(form.closeAt) || 0,
-        leaderboardLocked: !!form.leaderboardLocked,
-      };
-      return d;
-    });
-  }
-
-  function createNewMonth() {
-    const newId = prompt("New challenge ID (YYYY-MM)", mmYYYY());
-    if (!newId) return;
-    if (data.challenges[newId]) {
-      alert("That month already exists.");
-      return;
-    }
-    setData((prev) => {
-      const d = shallowClone(prev);
-      d.challenges[newId] = {
-        id: newId,
-        title: "New Monthly Challenge",
-        tagline: "",
-        description: "",
-        rules: ["Add clear rules."],
-        prize: "TBA",
-        showPrize: true,
-        showRules: true,
-        scoringMode: "time_lowest",
-        scoreLabel: "mm:ss",
-        precision: 1,
-        tiebreaker: "earliest",
-        categories: ["Female", "Male"],
-        coverImage: "",
-        options: {
-          submissionsEnabled: true,
-          requireVideo: true,
-          maxEntriesPerName: 3,
-          openAt: 0,
-          closeAt: 0,
-          leaderboardLocked: false,
-        },
-        submissions: [],
-      };
-      return d;
-    });
-    setSelectedId(newId);
-  }
-
-  function setActive() {
-    setData((prev) => ({ ...prev, activeChallengeId: selectedId }));
-  }
-
-  function deleteMonth() {
-    if (!confirm(`Delete ${selectedId}? This cannot be undone.`)) return;
-    setData((prev) => {
-      const d = shallowClone(prev);
-      delete d.challenges[selectedId];
-      const ids = Object.keys(d.challenges).sort((a, b) => (a < b ? 1 : -1));
-      d.activeChallengeId = ids[0] || mmYYYY();
-      if (!d.challenges[d.activeChallengeId]) {
-        d.challenges[d.activeChallengeId] = defaultSeed().challenges[mmYYYY()];
-      }
-      return d;
-    });
-    setSelectedId(mmYYYY());
-  }
-
-  function resetSubmissions() {
-    if (!confirm("Clear all submissions for this month?")) return;
-    setData((prev) => {
-      const d = shallowClone(prev);
-      d.challenges[selectedId].submissions = [];
-      return d;
-    });
-  }
-
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div className="space-y-3">
-        <div className="grid grid-cols-1 gap-2">
-          <Input label="Title" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />
-          <Input label="Tagline (one line)" value={form.tagline} onChange={(v) => setForm({ ...form, tagline: v })} />
-          <Textarea label="Description (optional)" value={form.description} onChange={(v) => setForm({ ...form, description: v })} />
-          <Textarea label="Rules (one per line)" value={form.rules} onChange={(v) => setForm({ ...form, rules: v })} rows={6} />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Input label="Prize" value={form.prize} onChange={(v) => setForm({ ...form, prize: v })} />
-          <Input label="Cover image URL" value={form.coverImage} onChange={(v) => setForm({ ...form, coverImage: v })} />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Toggle label="Show prize" checked={form.showPrize} onChange={(v) => setForm({ ...form, showPrize: v })} />
-          <Toggle label="Show rules" checked={form.showRules} onChange={(v) => setForm({ ...form, showRules: v })} />
-        </div>
-      </div>
-      <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <Select label="Scoring" value={form.scoringMode} onChange={(v) => setForm({ ...form, scoringMode: v })} options={[
-            { label: "Lowest time wins", value: "time_lowest" },
-            { label: "Highest number wins", value: "number_highest" },
-          ]} />
-          <Input label="Score input hint" value={form.scoreLabel} onChange={(v) => setForm({ ...form, scoreLabel: v })} />
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          <Input label="Precision (decimals)" type="number" value={form.precision} onChange={(v) => setForm({ ...form, precision: v })} />
-          <Select label="Tiebreaker" value={form.tiebreaker} onChange={(v) => setForm({ ...form, tiebreaker: v })} options={[{label:"Earliest entry", value:"earliest"},{label:"Latest entry", value:"latest"}]} />
-          <Input label="Categories (comma)" value={form.categories} onChange={(v) => setForm({ ...form, categories: v })} />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Toggle label="Enable submissions" checked={form.submissionsEnabled} onChange={(v) => setForm({ ...form, submissionsEnabled: v })} />
-          <Toggle label="Require video" checked={form.requireVideo} onChange={(v) => setForm({ ...form, requireVideo: v })} />
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          <Input label="Max entries/name" type="number" value={form.maxEntriesPerName} onChange={(v) => setForm({ ...form, maxEntriesPerName: v })} />
-          <Input label="Open at (epoch ms)" type="number" value={form.openAt} onChange={(v) => setForm({ ...form, openAt: v })} />
-          <Input label="Close at (epoch ms)" type="number" value={form.closeAt} onChange={(v) => setForm({ ...form, closeAt: v })} />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Toggle label="Lock leaderboard" checked={form.leaderboardLocked} onChange={(v) => setForm({ ...form, leaderboardLocked: v })} />
-          <div className="hidden sm:block" />
-        </div>
-
-        <div className="flex flex-wrap gap-2 pt-2">
-          <button onClick={saveEdits} className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold">Save</button>
-          <button onClick={setActive} className="rounded-xl bg-white ring-1 ring-slate-200 px-4 py-2 text-sm font-semibold">Set Active</button>
-          <button onClick={createNewMonth} className="rounded-xl bg-white ring-1 ring-slate-200 px-4 py-2 text-sm font-semibold">New Month</button>
-          <button onClick={resetSubmissions} className="rounded-xl bg-white ring-1 ring-rose-200 text-rose-700 px-4 py-2 text-sm font-semibold">Reset Submissions</button>
-          <button onClick={deleteMonth} className="rounded-xl bg-white ring-1 ring-rose-200 text-rose-700 px-4 py-2 text-sm font-semibold">Delete Month</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AdminEntriesTab({ data, setData, selectedId }) {
-  const ch = data.challenges[selectedId];
-  const [filterCat, setFilterCat] = useState("All");
-  const [filterStatus, setFilterStatus] = useState("All");
-
-  function removeEntry(id) {
-    if (!confirm("Delete this entry?")) return;
-    setData((prev) => {
-      const d = shallowClone(prev);
-      d.challenges[selectedId].submissions = d.challenges[selectedId].submissions.filter((s) => s.id !== id);
-      return d;
-    });
-  }
-
-  function updateEntry(id, patch) {
-    setData((prev) => {
-      const d = shallowClone(prev);
-      const arr = d.challenges[selectedId].submissions;
-      const i = arr.findIndex((s) => s.id === id);
-      if (i >= 0) {
-        arr[i] = { ...arr[i], ...patch };
-      }
-      return d;
-    });
-  }
-
-  function exportCSV() {
-    const rows = [["name","category","value","videoUrl","createdAt","status"]];
-    ch.submissions.forEach((s) => rows.push([s.name, s.category, s.value, s.videoUrl, new Date(s.createdAt).toISOString(), s.status || "approved"]));
-    const csv = rows.map((r) => r.map((c) => `"${String(c).replaceAll('"','""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${selectedId}-leaderboard.csv`;
-    a.click();
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <Pill>{ch.submissions.length} entries</Pill>
-        <select className="rounded-xl bg-white/80 px-3 py-1.5 text-sm ring-1 ring-slate-200" value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
-          <option>All</option>
-          {(ch.categories || []).map((c) => <option key={c}>{c}</option>)}
-        </select>
-        <select className="rounded-xl bg-white/80 px-3 py-1.5 text-sm ring-1 ring-slate-200" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-          {['All','approved','pending','rejected'].map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
-        <ExportImport data={data} setData={setData} />
-        <button onClick={exportCSV} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Export CSV</button>
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="text-left text-slate-600">
-              <th className="py-2 pr-3">Name</th>
-              <th className="py-2 pr-3">Category</th>
-              <th className="py-2 pr-3">Score</th>
-              <th className="py-2 pr-3">Video</th>
-              <th className="py-2 pr-3">Date</th>
-              <th className="py-2 pr-3">Status</th>
-              <th className="py-2 pr-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ch.submissions
-              .filter((s) => (filterCat === "All" || s.category === filterCat))
-              .filter((s) => (filterStatus === "All" || (s.status || "approved") === filterStatus))
-              .map((s) => (
-                <tr key={s.id} className="border-t border-slate-100">
-                  <td className="py-2 pr-3">
-                    <input className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200 w-40" value={s.name} onChange={(e) => updateEntry(s.id, { name: e.target.value })} />
-                  </td>
-                  <td className="py-2 pr-3">
-                    <select className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200" value={s.category} onChange={(e) => updateEntry(s.id, { category: e.target.value })}>
-                      {(ch.categories || []).map((c) => <option key={c}>{c}</option>)}
-                    </select>
-                  </td>
-                  <td className="py-2 pr-3">
-                    <ScoreEditor scoringMode={ch.scoringMode} value={s.value} onChange={(val) => updateEntry(s.id, { value: val })} />
-                  </td>
-                  <td className="py-2 pr-3 w-56">
-                    <input className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200 w-56" value={s.videoUrl} onChange={(e) => updateEntry(s.id, { videoUrl: e.target.value })} />
-                  </td>
-                  <td className="py-2 pr-3">{new Date(s.createdAt).toLocaleString()}</td>
-                  <td className="py-2 pr-3">
-                    <select className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200" value={s.status || "approved"} onChange={(e) => updateEntry(s.id, { status: e.target.value })}>
-                      {['approved','pending','rejected'].map(st => <option key={st}>{st}</option>)}
-                    </select>
-                  </td>
-                  <td className="py-2 pr-3">
-                    <button onClick={() => removeEntry(s.id)} className="rounded-lg bg-white ring-1 ring-rose-200 text-rose-700 px-2 py-1 text-xs">Delete</button>
-                  </td>
-                </tr>
+          {/* Sub header (compact) */}
+          <div className="px-5 md:px-10 mt-1 mb-5 flex flex-wrap items-center gap-2">
+            <Pill>Month: <span className="font-semibold ml-1">{selectedId}</span></Pill>
+            <select
+              className="rounded-xl bg-white/80 px-3 py-1.5 text-xs ring-1 ring-slate-200 text-slate-800"
+              value={selectedId}
+              onChange={(e) => setSelectedId(e.target.value)}
+            >
+              {allMonths.map((id) => (
+                <option key={id} value={id}>{id}</option>
               ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
+            </select>
+            <Pill>Active: <span className="font-semibold ml-1">{data.activeChallengeId}</span></Pill>
+          </div>
 
-function AdminSettingsTab({ data, setData }) {
-  const [pw, setPw] = useState(localStorage.getItem(LS_ADMIN_KEY) || "caveadmin");
-  const [brandingName, setBrandingName] = useState(data.global?.brandingName || "The Cave Gym");
-  const [termsUrl, setTermsUrl] = useState(data.global?.termsUrl || "");
+          {/* Main content */}
+          <main className="px-5 md:px-10 grid grid-cols-1 xl:grid-cols-3 gap-5 pb-14">
+            <div className="xl:col-span-2 space-y-5">
+              <ChallengeCard challenge={challenge} termsUrl={data.global?.termsUrl} />
+              <Leaderboard challenge={challenge} />
+            </div>
+            <div className="space-y-5">
+              <SubmitForm
+                challenge={challenge}
+                disabled={!withinWindow(challenge) || selectedId !== data.activeChallengeId || challenge.options?.leaderboardLocked}
+                onSubmit={(entry) => {
+                  // enforce max entries per name
+                  const maxPer = challenge.options?.maxEntriesPerName || 3;
+                  const count = (challenge.submissions || []).filter((s) => s.name.trim().toLowerCase() === entry.name.trim().toLowerCase()).length;
+                  if (count >= maxPer) {
+                    alert(`Limit reached: max ${maxPer} submissions for this month.`);
+                    return;
+                  }
+                  setData((prev) => {
+                    const d = shallowClone(prev);
+                    d.challenges[challenge.id].submissions.push(entry);
+                    return d;
+                  });
+                }}
+              />
+            </div>
+          </main>
 
-  function save() {
-    localStorage.setItem(LS_ADMIN_KEY, pw);
-    setData((prev) => ({
-      ...prev,
-      global: { ...(prev.global||{}), brandingName, termsUrl }
-    }));
-    alert("Saved.");
-  }
+          {adminMode && (
+            <AdminPanel
+              authed={authed}
+              onAuthed={() => setAuthed(true)}
+              data={data}
+              setData={setData}
+              selectedId={selectedId}
+              setSelectedId={setSelectedId}
+            />
+          )}
 
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div className="space-y-3">
-        <Input label="Admin password" type="password" value={pw} onChange={setPw} />
-        <Input label="Branding name" value={brandingName} onChange={setBrandingName} />
-        <Input label="Terms URL" value={termsUrl} onChange={setTermsUrl} />
-        <button onClick={save} className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold">Save</button>
-      </div>
-      <div className="space-y-2">
-        <SectionTitle>Tips</SectionTitle>
-        <ul className="list-disc pl-5 text-slate-700 space-y-1 text-sm">
-          <li>Use the Archive button (top) for quick browsing.</li>
-          <li>Set open/close times (epoch ms) to auto-open/close submissions.</li>
-          <li>Lock leaderboard to freeze results (useful post-verification).</li>
-        </ul>
-      </div>
-    </div>
-  );
-}
+          {showArchive && (
+            <ArchiveModal
+              challenges={data.challenges}
+              activeId={selectedId}
+              onSelect={(id) => { setSelectedId(id); setShowArchive(false); }}
+              onClose={() => setShowArchive(false)}
+            />
+          )}
 
-// Small helpers
-function Input({ label, value, onChange, type = "text" }) {
-  return (
-    <label className="block text-xs text-slate-700">
-      <span className="mb-1 inline-block text-slate-600">{label}</span>
-      <input className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200" value={value} onChange={(e) => onChange(e.target.value)} type={type} />
-    </label>
-  );
-}
-
-function Textarea({ label, value, onChange, rows = 4 }) {
-  return (
-    <label className="block text-xs text-slate-700">
-      <span className="mb-1 inline-block text-slate-600">{label}</span>
-      <textarea className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200" value={value} onChange={(e) => onChange(e.target.value)} rows={rows} />
-    </label>
-  );
-}
-
-function Select({ label, value, onChange, options }) {
-  return (
-    <label className="block text-xs text-slate-700">
-      <span className="mb-1 inline-block text-slate-600">{label}</span>
-      <select className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200" value={value} onChange={(e) => onChange(e.target.value)}>
-        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </label>
-  );
-}
-
-function Toggle({ label, checked, onChange }) {
-  return (
-    <label className="flex items-center gap-2 text-xs text-slate-700">
-      <input type="checkbox" className="accent-slate-900" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      {label}
-    </label>
-  );
-}
-
-function ScoreEditor({ scoringMode, value, onChange }) {
-  const [raw, setRaw] = useState(() => scoringMode === "time_lowest" ? formatSeconds(value) : String(value));
-  useEffect(() => {
-    setRaw(scoringMode === "time_lowest" ? formatSeconds(value) : String(value));
-  }, [scoringMode, value]);
-
-  function commit(v) {
-    if (scoringMode === "time_lowest") {
-      const sec = parseTimeToSeconds(v);
-      if (!isNaN(sec)) onChange(sec);
-    } else {
-      const num = Number(v);
-      if (!isNaN(num)) onChange(num);
+          <footer className="px-5 md:px-10 py-8 text-[11px] text-slate-500">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div>Local data. Use Admin → Entries → Export for backups.</div>
+              <div>Built for The Cave Gym · v2</div>
+            </div>
+          </footer>
+        </div>
+      );
     }
-  }
 
-  return (
-    <input
-      className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200 w-28"
-      value={raw}
-      onChange={(e) => setRaw(e.target.value)}
-      onBlur={() => commit(raw)}
-    />
-  );
-}
-
-function ExportImport({ data, setData }) {
-  const [open, setOpen] = useState(false);
-  const [json, setJson] = useState("");
-
-  function doExport() {
-    setJson(JSON.stringify(data, null, 2));
-    setOpen(true);
-  }
-
-  function doImport() {
-    try {
-      const parsed = JSON.parse(json);
-      if (!parsed || !parsed.challenges) throw new Error("Invalid data");
-      setData(parsed);
-      alert("Imported successfully.");
-    } catch (e) {
-      alert("Import failed: " + e.message);
+    function ChallengeCard({ challenge, termsUrl }) {
+      if (!challenge) return null;
+      return (
+        <Card title={challenge.title}>
+          <div className="grid md:grid-cols-[1fr] gap-3 items-start">
+            {challenge.coverImage && (
+              <img src={challenge.coverImage} alt="challenge" className="w-full h-40 object-cover rounded-xl ring-1 ring-slate-200" />
+            )}
+            <div className="space-y-2">
+              {challenge.tagline && <p className="text-slate-700 text-sm">{challenge.tagline}</p>}
+              <div className="flex flex-wrap items-center gap-2">
+                <Pill>{challenge.scoringMode === "time_lowest" ? "Lowest time wins" : "Highest number wins"}</Pill>
+                <Pill>Categories: {(challenge.categories || []).join(" / ")}</Pill>
+                {challenge.showPrize && challenge.prize && <Pill>Prize: {challenge.prize}</Pill>}
+                {!withinWindow(challenge) && <Pill>Submissions closed</Pill>}
+              </div>
+              {challenge.showRules && (challenge.rules?.length > 0) && (
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-slate-700 text-sm">Rules</summary>
+                  <ul className="list-disc pl-5 text-slate-700 space-y-1 text-sm mt-1">
+                    {challenge.rules.map((r, i) => <li key={i}>{r}</li>)}
+                  </ul>
+                </details>
+              )}
+              {termsUrl && (
+                <a className="text-xs underline text-slate-500" href={termsUrl} target="_blank" rel="noreferrer">Terms & fair play</a>
+              )}
+            </div>
+          </div>
+        </Card>
+      );
     }
-  }
 
-  return (
-    <div className="flex items-center gap-2">
-      <button onClick={doExport} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Backup</button>
-      <button onClick={() => setOpen(true)} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Restore</button>
+    function Leaderboard({ challenge }) {
+      const categories = challenge.categories || [];
+      const { scoringMode, tiebreaker, precision } = challenge;
 
-      {open && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={() => setOpen(false)}>
-          <div className="w-full max-w-2xl rounded-2xl bg-white p-4 ring-1 ring-slate-200" onClick={(e) => e.stopPropagation()}>
-            <h4 className="text-base font-semibold mb-2">Backup / Restore</h4>
-            <textarea className="w-full min-h-[300px] rounded-xl bg-slate-50 px-3 py-2 text-xs ring-1 ring-slate-200" value={json} onChange={(e) => setJson(e.target.value)} />
-            <div className="flex justify-end gap-2 mt-3">
-              <button onClick={doExport} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Refresh</button>
-              <button onClick={doImport} className="rounded-xl bg-slate-900 text-white px-3 py-1.5 text-sm">Import</button>
-              <button onClick={() => setOpen(false)} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Close</button>
+      return (
+        <Card title="Leaderboard">
+          <div className="space-y-5">
+            {categories.map((cat) => {
+              const entries = (challenge.submissions || [])
+                .filter((s) => s.category === cat && (s.status || "approved") !== "rejected")
+                .sort((a, b) => compareEntries(a, b, scoringMode, tiebreaker));
+              return (
+                <div key={cat}>
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className="text-slate-800 font-semibold text-sm">{cat}</h4>
+                    <Pill>{entries.length} entries</Pill>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-slate-600">
+                          <th className="py-1.5 pr-4">#</th>
+                          <th className="py-1.5 pr-4">Name</th>
+                          <th className="py-1.5 pr-4">Score</th>
+                          <th className="py-1.5 pr-4">Proof</th>
+                          <th className="py-1.5 pr-4">Date</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {entries.length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="py-4 text-slate-500">No entries yet.</td>
+                          </tr>
+                        )}
+                        {entries.map((e, idx) => (
+                          <tr key={e.id} className="border-t border-slate-100">
+                            <td className="py-1.5 pr-4 font-medium text-slate-800">{idx + 1}</td>
+                            <td className="py-1.5 pr-4">{e.name}</td>
+                            <td className="py-1.5 pr-4 font-semibold text-slate-900">
+                              {challenge.scoringMode === "time_lowest" ? formatSeconds(e.value, precision) : e.value}
+                            </td>
+                            <td className="py-1.5 pr-4">
+                              {e.videoUrl ? (
+                                <a className="underline text-blue-700" href={e.videoUrl} target="_blank" rel="noreferrer">View</a>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 pr-4 text-slate-600">{new Date(e.createdAt).toLocaleDateString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      );
+    }
+
+    function SubmitForm({ challenge, disabled, onSubmit }) {
+      const [name, setName] = React.useState("");
+      const [category, setCategory] = React.useState(challenge.categories?.[0] || "");
+      const [score, setScore] = React.useState("");
+      const [videoUrl, setVideoUrl] = React.useState("");
+      const [err, setErr] = React.useState("");
+      const [ok, setOk] = React.useState("");
+
+      React.useEffect(() => {
+        setCategory(challenge.categories?.[0] || "");
+        setScore("");
+        setName("");
+        setVideoUrl("");
+        setErr("");
+        setOk("");
+      }, [challenge.id]);
+
+      function handleSubmit(e) {
+        e.preventDefault();
+        setErr("");
+        setOk("");
+
+        if (!name.trim()) return setErr("Enter your name.");
+        if (!category) return setErr("Choose a category.");
+        if (!score.trim()) return setErr("Enter your score.");
+        if (challenge.options?.requireVideo && !videoUrl.trim()) return setErr("Video link required.");
+
+        let value;
+        if (challenge.scoringMode === "time_lowest") {
+          value = parseTimeToSeconds(score);
+          if (isNaN(value)) return setErr("Invalid time. Use mm:ss (e.g., 1:23.4)");
+        } else {
+          value = Number(score);
+          if (isNaN(value)) return setErr("Invalid number.");
+        }
+
+        const entry = {
+          id: uuid(),
+          name: name.trim(),
+          category,
+          value,
+          videoUrl: videoUrl.trim(),
+          createdAt: Date.now(),
+          status: "approved", // default to approved for MVP
+        };
+        onSubmit(entry);
+        setOk("Submitted — nice work.");
+        setName("");
+        setScore("");
+        setVideoUrl("");
+      }
+
+      return (
+        <Card
+          title="Submit"
+          actions={disabled ? <Pill>Closed</Pill> : null}
+        >
+          <form onSubmit={handleSubmit} className="space-y-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Full name"
+                disabled={disabled}
+                required
+              />
+              <select
+                className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                disabled={disabled}
+                required
+              >
+                {(challenge.categories || []).map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
+                value={score}
+                onChange={(e) => setScore(e.target.value)}
+                placeholder={challenge.scoringMode === "time_lowest" ? "mm:ss" : "number"}
+                disabled={disabled}
+                required
+              />
+              <input
+                className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
+                value={videoUrl}
+                onChange={(e) => setVideoUrl(e.target.value)}
+                placeholder="Video link"
+                disabled={disabled || !challenge.options?.requireVideo}
+                required={!!challenge.options?.requireVideo}
+              />
+            </div>
+            {err && <div className="text-xs text-rose-600">{err}</div>}
+            {ok && <div className="text-xs text-emerald-600">{ok}</div>}
+            <div className="pt-1">
+              <button
+                type="submit"
+                disabled={disabled}
+                className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold disabled:opacity-50"
+              >
+                Submit Entry
+              </button>
+            </div>
+          </form>
+        </Card>
+      );
+    }
+
+    function ArchiveModal({ challenges, activeId, onSelect, onClose }) {
+      const ids = Object.keys(challenges).sort((a, b) => (a < b ? 1 : -1));
+      return (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
+          <div className="w-full max-w-3xl rounded-2xl bg-white p-4 ring-1 ring-slate-200" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-base font-semibold">Past Challenges</h4>
+              <button onClick={onClose} className="text-slate-600 text-sm">Close</button>
+            </div>
+            <div className="grid sm:grid-cols-2 gap-3">
+              {ids.map((id) => {
+                const ch = challenges[id];
+                // get top-1 per category
+                const winners = (ch.categories || []).map((cat) => {
+                  const sorted = (ch.submissions || [])
+                    .filter((s) => s.category === cat && (s.status || "approved") !== "rejected")
+                    .sort((a, b) => compareEntries(a, b, ch.scoringMode, ch.tiebreaker));
+                  const top = sorted[0];
+                  return { cat, top };
+                });
+                return (
+                  <button key={id} onClick={() => onSelect(id)} className={`text-left rounded-xl ring-1 ring-slate-200 p-3 hover:bg-slate-50 ${id===activeId?"bg-slate-50":""}`}>
+                    <div className="flex items-center justify-between">
+                      <div className="font-semibold text-slate-900">{id} · {ch.title}</div>
+                    </div>
+                    <div className="mt-1 text-xs text-slate-600 line-clamp-2">{ch.tagline || ch.description}</div>
+                    <div className="mt-2 text-xs text-slate-700 space-y-1">
+                      {winners.map(({cat, top}) => (
+                        <div key={cat}>
+                          <span className="font-medium">{cat}:</span> {top ? `${top.name} (${ch.scoringMode === 'time_lowest' ? formatSeconds(top.value, ch.precision) : top.value})` : "—"}
+                        </div>
+                      ))}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
-      )}
-    </div>
-  );
-}
+      );
+    }
 
-// --------------------------- Self Tests ---------------------------
-function runSelfTests() {
-  try {
-    const approx = (a, b, tol = 0.05) => Math.abs(a - b) <= tol;
-    const tests = [
-      () => parseTimeToSeconds("45") === 45,
-      () => parseTimeToSeconds("1:05") === 65,
-      () => approx(parseTimeToSeconds("1:23.4"), 83.4, 0.01),
-      () => parseTimeToSeconds("2:03:05") === 7385,
-      () => formatSeconds(83.4, 1) === "1:23.4",
-      () => formatSeconds(65, 0) === "1:05",
-    ];
-    const results = tests.map((fn, i) => ({ i: i + 1, ok: !!fn() }));
-    const pass = results.every(r => r.ok);
-    // eslint-disable-next-line no-console
-    console.log("Cave Gym self-tests:", results, pass ? "✓ all good" : "✗ check tests");
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn("Self-tests failed:", e);
-  }
-}
+    // --------------------------- Admin ---------------------------
+    function AdminPanel({ authed, onAuthed, data, setData, selectedId, setSelectedId }) {
+      const [pwInput, setPwInput] = React.useState("");
+      const [tab, setTab] = React.useState("challenge");
+
+      if (!authed) {
+        return (
+          <div className="fixed inset-x-0 bottom-0 z-30">
+            <div className="mx-4 md:mx-10 mb-6 rounded-2xl bg-white ring-1 ring-slate-200">
+              <div className="p-5">
+                <h3 className="text-base font-semibold text-slate-900 mb-2">Admin Login</h3>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const stored = localStorage.getItem(LS_ADMIN_KEY) || "caveadmin"; // default password
+                    if (pwInput === stored) onAuthed();
+                  }}
+                  className="flex gap-2"
+                >
+                  <input
+                    className="flex-1 rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200"
+                    placeholder="Admin password (default: caveadmin)"
+                    type="password"
+                    value={pwInput}
+                    onChange={(e) => setPwInput(e.target.value)}
+                  />
+                  <button className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold">Login</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="fixed inset-x-0 bottom-0 z-30">
+          <div className="mx-4 md:mx-10 mb-6 rounded-2xl bg-white ring-1 ring-slate-200">
+            <div className="p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-base font-semibold text-slate-900">Admin</h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setTab("challenge")}
+                    className={`rounded-xl px-3 py-1.5 text-sm ring-1 ring-slate-200 ${tab === "challenge" ? "bg-slate-900 text-white" : "bg-white"}`}
+                  >Challenge</button>
+                  <button
+                    onClick={() => setTab("entries")}
+                    className={`rounded-xl px-3 py-1.5 text-sm ring-1 ring-slate-200 ${tab === "entries" ? "bg-slate-900 text-white" : "bg-white"}`}
+                  >Entries</button>
+                  <button
+                    onClick={() => setTab("settings")}
+                    className={`rounded-xl px-3 py-1.5 text-sm ring-1 ring-slate-200 ${tab === "settings" ? "bg-slate-900 text-white" : "bg-white"}`}
+                  >Settings</button>
+                </div>
+              </div>
+
+              {tab === "challenge" && (
+                <AdminChallengeTab data={data} setData={setData} selectedId={selectedId} setSelectedId={setSelectedId} />
+              )}
+              {tab === "entries" && (
+                <AdminEntriesTab data={data} setData={setData} selectedId={selectedId} />
+              )}
+              {tab === "settings" && (
+                <AdminSettingsTab data={data} setData={setData} />
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function AdminChallengeTab({ data, setData, selectedId, setSelectedId }) {
+      const ch = data.challenges[selectedId];
+      const [form, setForm] = React.useState(() => ({
+        title: ch.title || "",
+        tagline: ch.tagline || "",
+        description: ch.description || "",
+        rules: (ch.rules || []).join("\n"),
+        prize: ch.prize || "",
+        showPrize: !!ch.showPrize,
+        showRules: !!ch.showRules,
+        scoringMode: ch.scoringMode || "time_lowest",
+        scoreLabel: ch.scoreLabel || (ch.scoringMode === "time_lowest" ? "mm:ss" : "number"),
+        precision: ch.precision ?? 1,
+        tiebreaker: ch.tiebreaker || "earliest",
+        categories: (ch.categories || []).join(", "),
+        coverImage: ch.coverImage || "",
+        submissionsEnabled: ch.options?.submissionsEnabled ?? true,
+        requireVideo: ch.options?.requireVideo ?? true,
+        maxEntriesPerName: ch.options?.maxEntriesPerName ?? 3,
+        openAt: ch.options?.openAt || 0,
+        closeAt: ch.options?.closeAt || 0,
+        leaderboardLocked: ch.options?.leaderboardLocked ?? false,
+      }));
+
+      React.useEffect(() => {
+        const ch2 = data.challenges[selectedId];
+        setForm({
+          title: ch2.title || "",
+          tagline: ch2.tagline || "",
+          description: ch2.description || "",
+          rules: (ch2.rules || []).join("\n"),
+          prize: ch2.prize || "",
+          showPrize: !!ch2.showPrize,
+          showRules: !!ch2.showRules,
+          scoringMode: ch2.scoringMode || "time_lowest",
+          scoreLabel: ch2.scoreLabel || (ch2.scoringMode === "time_lowest" ? "mm:ss" : "number"),
+          precision: ch2.precision ?? 1,
+          tiebreaker: ch2.tiebreaker || "earliest",
+          categories: (ch2.categories || []).join(", "),
+          coverImage: ch2.coverImage || "",
+          submissionsEnabled: ch2.options?.submissionsEnabled ?? true,
+          requireVideo: ch2.options?.requireVideo ?? true,
+          maxEntriesPerName: ch2.options?.maxEntriesPerName ?? 3,
+          openAt: ch2.options?.openAt || 0,
+          closeAt: ch2.options?.closeAt || 0,
+          leaderboardLocked: ch2.options?.leaderboardLocked ?? false,
+        });
+      }, [selectedId]);
+
+      function saveEdits() {
+        setData((prev) => {
+          const d = shallowClone(prev);
+          const ch3 = d.challenges[selectedId];
+          ch3.title = form.title.trim();
+          ch3.tagline = form.tagline.trim();
+          ch3.description = form.description.trim();
+          ch3.rules = form.rules.split("\n").map((r) => r.trim()).filter(Boolean);
+          ch3.prize = form.prize.trim();
+          ch3.showPrize = !!form.showPrize;
+          ch3.showRules = !!form.showRules;
+          ch3.scoringMode = form.scoringMode;
+          ch3.scoreLabel = form.scoreLabel.trim() || (form.scoringMode === "time_lowest" ? "mm:ss" : "number");
+          ch3.precision = Number(form.precision) || 0;
+          ch3.tiebreaker = form.tiebreaker;
+          ch3.categories = form.categories.split(",").map((c) => c.trim()).filter(Boolean);
+          ch3.coverImage = form.coverImage.trim();
+          ch3.options = {
+            submissionsEnabled: !!form.submissionsEnabled,
+            requireVideo: !!form.requireVideo,
+            maxEntriesPerName: Number(form.maxEntriesPerName) || 1,
+            openAt: Number(form.openAt) || 0,
+            closeAt: Number(form.closeAt) || 0,
+            leaderboardLocked: !!form.leaderboardLocked,
+          };
+          return d;
+        });
+      }
+
+      function createNewMonth() {
+        const newId = prompt("New challenge ID (YYYY-MM)", mmYYYY());
+        if (!newId) return;
+        if (data.challenges[newId]) {
+          alert("That month already exists.");
+          return;
+        }
+        setData((prev) => {
+          const d = shallowClone(prev);
+          d.challenges[newId] = {
+            id: newId,
+            title: "New Monthly Challenge",
+            tagline: "",
+            description: "",
+            rules: ["Add clear rules."],
+            prize: "TBA",
+            showPrize: true,
+            showRules: true,
+            scoringMode: "time_lowest",
+            scoreLabel: "mm:ss",
+            precision: 1,
+            tiebreaker: "earliest",
+            categories: ["Female", "Male"],
+            coverImage: "",
+            options: {
+              submissionsEnabled: true,
+              requireVideo: true,
+              maxEntriesPerName: 3,
+              openAt: 0,
+              closeAt: 0,
+              leaderboardLocked: false,
+            },
+            submissions: [],
+          };
+          return d;
+        });
+        setSelectedId(newId);
+      }
+
+      function setActive() {
+        setData((prev) => ({ ...prev, activeChallengeId: selectedId }));
+      }
+
+      function deleteMonth() {
+        if (!confirm(`Delete ${selectedId}? This cannot be undone.`)) return;
+        setData((prev) => {
+          const d = shallowClone(prev);
+          delete d.challenges[selectedId];
+          const ids = Object.keys(d.challenges).sort((a, b) => (a < b ? 1 : -1));
+          d.activeChallengeId = ids[0] || mmYYYY();
+          if (!d.challenges[d.activeChallengeId]) {
+            d.challenges[d.activeChallengeId] = defaultSeed().challenges[mmYYYY()];
+          }
+          return d;
+        });
+        setSelectedId(mmYYYY());
+      }
+
+      function resetSubmissions() {
+        if (!confirm("Clear all submissions for this month?")) return;
+        setData((prev) => {
+          const d = shallowClone(prev);
+          d.challenges[selectedId].submissions = [];
+          return d;
+        });
+      }
+
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 gap-2">
+              <Input label="Title" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />
+              <Input label="Tagline (one line)" value={form.tagline} onChange={(v) => setForm({ ...form, tagline: v })} />
+              <Textarea label="Description (optional)" value={form.description} onChange={(v) => setForm({ ...form, description: v })} />
+              <Textarea label="Rules (one per line)" value={form.rules} onChange={(v) => setForm({ ...form, rules: v })} rows={6} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Prize" value={form.prize} onChange={(v) => setForm({ ...form, prize: v })} />
+              <Input label="Cover image URL" value={form.coverImage} onChange={(v) => setForm({ ...form, coverImage: v })} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Toggle label="Show prize" checked={form.showPrize} onChange={(v) => setForm({ ...form, showPrize: v })} />
+              <Toggle label="Show rules" checked={form.showRules} onChange={(v) => setForm({ ...form, showRules: v })} />
+            </div>
+          </div>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Select label="Scoring" value={form.scoringMode} onChange={(v) => setForm({ ...form, scoringMode: v })} options={[
+                { label: "Lowest time wins", value: "time_lowest" },
+                { label: "Highest number wins", value: "number_highest" },
+              ]} />
+              <Input label="Score input hint" value={form.scoreLabel} onChange={(v) => setForm({ ...form, scoreLabel: v })} />
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <Input label="Precision (decimals)" type="number" value={form.precision} onChange={(v) => setForm({ ...form, precision: v })} />
+              <Select label="Tiebreaker" value={form.tiebreaker} onChange={(v) => setForm({ ...form, tiebreaker: v })} options={[{label:"Earliest entry", value:"earliest"},{label:"Latest entry", value:"latest"}]} />
+              <Input label="Categories (comma)" value={form.categories} onChange={(v) => setForm({ ...form, categories: v })} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Toggle label="Enable submissions" checked={form.submissionsEnabled} onChange={(v) => setForm({ ...form, submissionsEnabled: v })} />
+              <Toggle label="Require video" checked={form.requireVideo} onChange={(v) => setForm({ ...form, requireVideo: v })} />
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <Input label="Max entries/name" type="number" value={form.maxEntriesPerName} onChange={(v) => setForm({ ...form, maxEntriesPerName: v })} />
+              <Input label="Open at (epoch ms)" type="number" value={form.openAt} onChange={(v) => setForm({ ...form, openAt: v })} />
+              <Input label="Close at (epoch ms)" type="number" value={form.closeAt} onChange={(v) => setForm({ ...form, closeAt: v })} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Toggle label="Lock leaderboard" checked={form.leaderboardLocked} onChange={(v) => setForm({ ...form, leaderboardLocked: v })} />
+              <div className="hidden sm:block" />
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-2">
+              <button onClick={saveEdits} className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold">Save</button>
+              <button onClick={setActive} className="rounded-xl bg-white ring-1 ring-slate-200 px-4 py-2 text-sm font-semibold">Set Active</button>
+              <button onClick={createNewMonth} className="rounded-xl bg-white ring-1 ring-slate-200 px-4 py-2 text-sm font-semibold">New Month</button>
+              <button onClick={resetSubmissions} className="rounded-xl bg-white ring-1 ring-rose-200 text-rose-700 px-4 py-2 text-sm font-semibold">Reset Submissions</button>
+              <button onClick={deleteMonth} className="rounded-xl bg-white ring-1 ring-rose-200 text-rose-700 px-4 py-2 text-sm font-semibold">Delete Month</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function AdminEntriesTab({ data, setData, selectedId }) {
+      const ch = data.challenges[selectedId];
+      const [filterCat, setFilterCat] = React.useState("All");
+      const [filterStatus, setFilterStatus] = React.useState("All");
+
+      function removeEntry(id) {
+        if (!confirm("Delete this entry?")) return;
+        setData((prev) => {
+          const d = shallowClone(prev);
+          d.challenges[selectedId].submissions = d.challenges[selectedId].submissions.filter((s) => s.id !== id);
+          return d;
+        });
+      }
+
+      function updateEntry(id, patch) {
+        setData((prev) => {
+          const d = shallowClone(prev);
+          const arr = d.challenges[selectedId].submissions;
+          const i = arr.findIndex((s) => s.id === id);
+          if (i >= 0) {
+            arr[i] = { ...arr[i], ...patch };
+          }
+          return d;
+        });
+      }
+
+      function exportCSV() {
+        const rows = [["name","category","value","videoUrl","createdAt","status"]];
+        ch.submissions.forEach((s) => rows.push([s.name, s.category, s.value, s.videoUrl, new Date(s.createdAt).toISOString(), s.status || "approved"]));
+        const csv = rows.map((r) => r.map((c) => `"${String(c).replaceAll('"','""')}"`).join(",")).join("\n");
+        const blob = new Blob([csv], { type: "text/csv" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${selectedId}-leaderboard.csv`;
+        a.click();
+      }
+
+      return (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill>{ch.submissions.length} entries</Pill>
+            <select className="rounded-xl bg-white/80 px-3 py-1.5 text-sm ring-1 ring-slate-200" value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
+              <option>All</option>
+              {(ch.categories || []).map((c) => <option key={c}>{c}</option>)}
+            </select>
+            <select className="rounded-xl bg-white/80 px-3 py-1.5 text-sm ring-1 ring-slate-200" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+              {['All','approved','pending','rejected'].map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <ExportImport data={data} setData={setData} />
+            <button onClick={exportCSV} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Export CSV</button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="text-left text-slate-600">
+                  <th className="py-2 pr-3">Name</th>
+                  <th className="py-2 pr-3">Category</th>
+                  <th className="py-2 pr-3">Score</th>
+                  <th className="py-2 pr-3">Video</th>
+                  <th className="py-2 pr-3">Date</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ch.submissions
+                  .filter((s) => (filterCat === "All" || s.category === filterCat))
+                  .filter((s) => (filterStatus === "All" || (s.status || "approved") === filterStatus))
+                  .map((s) => (
+                    <tr key={s.id} className="border-t border-slate-100">
+                      <td className="py-2 pr-3">
+                        <input className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200 w-40" value={s.name} onChange={(e) => updateEntry(s.id, { name: e.target.value })} />
+                      </td>
+                      <td className="py-2 pr-3">
+                        <select className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200" value={s.category} onChange={(e) => updateEntry(s.id, { category: e.target.value })}>
+                          {(ch.categories || []).map((c) => <option key={c}>{c}</option>)}
+                        </select>
+                      </td>
+                      <td className="py-2 pr-3">
+                        <ScoreEditor scoringMode={ch.scoringMode} value={s.value} onChange={(val) => updateEntry(s.id, { value: val })} />
+                      </td>
+                      <td className="py-2 pr-3 w-56">
+                        <input className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200 w-56" value={s.videoUrl} onChange={(e) => updateEntry(s.id, { videoUrl: e.target.value })} />
+                      </td>
+                      <td className="py-2 pr-3">{new Date(s.createdAt).toLocaleString()}</td>
+                      <td className="py-2 pr-3">
+                        <select className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200" value={s.status || "approved"} onChange={(e) => updateEntry(s.id, { status: e.target.value })}>
+                          {['approved','pending','rejected'].map(st => <option key={st}>{st}</option>)}
+                        </select>
+                      </td>
+                      <td className="py-2 pr-3">
+                        <button onClick={() => removeEntry(s.id)} className="rounded-lg bg-white ring-1 ring-rose-200 text-rose-700 px-2 py-1 text-xs">Delete</button>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    function AdminSettingsTab({ data, setData }) {
+      const [pw, setPw] = React.useState(localStorage.getItem(LS_ADMIN_KEY) || "caveadmin");
+      const [brandingName, setBrandingName] = React.useState(data.global?.brandingName || "The Cave Gym");
+      const [termsUrl, setTermsUrl] = React.useState(data.global?.termsUrl || "");
+
+      function save() {
+        localStorage.setItem(LS_ADMIN_KEY, pw);
+        setData((prev) => ({
+          ...prev,
+          global: { ...(prev.global||{}), brandingName, termsUrl }
+        }));
+        alert("Saved.");
+      }
+
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-3">
+            <Input label="Admin password" type="password" value={pw} onChange={setPw} />
+            <Input label="Branding name" value={brandingName} onChange={setBrandingName} />
+            <Input label="Terms URL" value={termsUrl} onChange={setTermsUrl} />
+            <button onClick={save} className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold">Save</button>
+          </div>
+          <div className="space-y-2">
+            <SectionTitle>Tips</SectionTitle>
+            <ul className="list-disc pl-5 text-slate-700 space-y-1 text-sm">
+              <li>Use the Archive button (top) for quick browsing.</li>
+              <li>Set open/close times (epoch ms) to auto-open/close submissions.</li>
+              <li>Lock leaderboard to freeze results (useful post-verification).</li>
+            </ul>
+          </div>
+        </div>
+      );
+    }
+
+    // Small helpers
+    function Input({ label, value, onChange, type = "text" }) {
+      return (
+        <label className="block text-xs text-slate-700">
+          <span className="mb-1 inline-block text-slate-600">{label}</span>
+          <input className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200" value={value} onChange={(e) => onChange(e.target.value)} type={type} />
+        </label>
+      );
+    }
+
+    function Textarea({ label, value, onChange, rows = 4 }) {
+      return (
+        <label className="block text-xs text-slate-700">
+          <span className="mb-1 inline-block text-slate-600">{label}</span>
+          <textarea className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200" value={value} onChange={(e) => onChange(e.target.value)} rows={rows} />
+        </label>
+      );
+    }
+
+    function Select({ label, value, onChange, options }) {
+      return (
+        <label className="block text-xs text-slate-700">
+          <span className="mb-1 inline-block text-slate-600">{label}</span>
+          <select className="w-full rounded-xl bg-white/80 px-3 py-2 text-sm ring-1 ring-slate-200" value={value} onChange={(e) => onChange(e.target.value)}>
+            {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </label>
+      );
+    }
+
+    function Toggle({ label, checked, onChange }) {
+      return (
+        <label className="flex items-center gap-2 text-xs text-slate-700">
+          <input type="checkbox" className="accent-slate-900" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+          {label}
+        </label>
+      );
+    }
+
+    function ScoreEditor({ scoringMode, value, onChange }) {
+      const [raw, setRaw] = React.useState(() => scoringMode === "time_lowest" ? formatSeconds(value) : String(value));
+      React.useEffect(() => {
+        setRaw(scoringMode === "time_lowest" ? formatSeconds(value) : String(value));
+      }, [scoringMode, value]);
+
+      function commit(v) {
+        if (scoringMode === "time_lowest") {
+          const sec = parseTimeToSeconds(v);
+          if (!isNaN(sec)) onChange(sec);
+        } else {
+          const num = Number(v);
+          if (!isNaN(num)) onChange(num);
+        }
+      }
+
+      return (
+        <input
+          className="rounded-lg bg-white/80 px-2 py-1 ring-1 ring-slate-200 w-28"
+          value={raw}
+          onChange={(e) => setRaw(e.target.value)}
+          onBlur={() => commit(raw)}
+        />
+      );
+    }
+
+    function ExportImport({ data, setData }) {
+      const [open, setOpen] = React.useState(false);
+      const [json, setJson] = React.useState("");
+
+      function doExport() {
+        setJson(JSON.stringify(data, null, 2));
+        setOpen(true);
+      }
+
+      function doImport() {
+        try {
+          const parsed = JSON.parse(json);
+          if (!parsed || !parsed.challenges) throw new Error("Invalid data");
+          setData(parsed);
+          alert("Imported successfully.");
+        } catch (e) {
+          alert("Import failed: " + e.message);
+        }
+      }
+
+      return (
+        <div className="flex items-center gap-2">
+          <button onClick={doExport} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Backup</button>
+          <button onClick={() => setOpen(true)} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Restore</button>
+
+          {open && (
+            <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={() => setOpen(false)}>
+              <div className="w-full max-w-2xl rounded-2xl bg-white p-4 ring-1 ring-slate-200" onClick={(e) => e.stopPropagation()}>
+                <h4 className="text-base font-semibold mb-2">Backup / Restore</h4>
+                <textarea className="w-full min-h-[300px] rounded-xl bg-slate-50 px-3 py-2 text-xs ring-1 ring-slate-200" value={json} onChange={(e) => setJson(e.target.value)} />
+                <div className="flex justify-end gap-2 mt-3">
+                  <button onClick={doExport} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Refresh</button>
+                  <button onClick={doImport} className="rounded-xl bg-slate-900 text-white px-3 py-1.5 text-sm">Import</button>
+                  <button onClick={() => setOpen(false)} className="rounded-xl bg-white ring-1 ring-slate-200 px-3 py-1.5 text-sm">Close</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // --------------------------- Self Tests ---------------------------
+    function runSelfTests() {
+      try {
+        const approx = (a, b, tol = 0.05) => Math.abs(a - b) <= tol;
+        const tests = [
+          () => parseTimeToSeconds("45") === 45,
+          () => parseTimeToSeconds("1:05") === 65,
+          () => approx(parseTimeToSeconds("1:23.4"), 83.4, 0.01),
+          () => parseTimeToSeconds("2:03:05") === 7385,
+          () => formatSeconds(83.4, 1) === "1:23.4",
+          () => formatSeconds(65, 0) === "1:05",
+        ];
+        const results = tests.map((fn, i) => ({ i: i + 1, ok: !!fn() }));
+        const pass = results.every(r => r.ok);
+        console.log("Cave Gym self-tests:", results, pass ? "✓ all good" : "✗ check tests");
+      } catch (e) {
+        console.warn("Self-tests failed:", e);
+      }
+    }
+
+    // --------------------------- Mount ---------------------------
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
